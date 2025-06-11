@@ -1,8 +1,9 @@
 from sqlalchemy.orm import Session
 from ..models.crawl_job import CrawlJob, ExtractedData
 from ..schemas.crawl_job import CrawlJobCreate, CrawlJobUpdate
-from ..core.crawler import AdvancedWebCrawler
-from typing import List, Optional
+from ..core.crawler import SimpleCrawler
+from typing import Dict, List, Optional
+import asyncio
 import logging
 import datetime
 
@@ -46,6 +47,7 @@ class CrawlService:
         for field, value in update_data.items():
             setattr(job, field, value)
         
+        job.updated_at = datetime.datetime.utcnow()
         self.db.commit()
         self.db.refresh(job)
         return job
@@ -55,37 +57,54 @@ class CrawlService:
         if not job:
             return False
         
+        # Delete associated extracted data
+        self.db.query(ExtractedData).filter(
+            ExtractedData.crawl_job_id == job_id
+        ).delete()
+        
         self.db.delete(job)
         self.db.commit()
         return True
     
-    async def execute_crawl_job(self, job_id: int) -> bool:
-        """Execute a crawl job"""
+    def execute_crawl_job(self, job_id: int) -> bool:
+        """Execute a crawl job synchronously"""
         job = self.db.query(CrawlJob).filter(CrawlJob.id == job_id).first()
         if not job:
+            logger.error(f"Crawl job {job_id} not found")
             return False
         
         try:
+            # Update job status
             job.status = "running"
             job.started_at = datetime.datetime.utcnow()
             self.db.commit()
             
-            async with AdvancedWebCrawler() as crawler:
-                results = await crawler.crawl_urls(job.target_urls, job.extraction_rules)
+            logger.info(f"Starting crawl job {job_id}: {job.name}")
             
+            # Execute crawling synchronously
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                results = loop.run_until_complete(self._run_crawler(job))
+            finally:
+                loop.close()
+            
+            # Store extracted data
             for result in results:
                 extracted_data = ExtractedData(
                     crawl_job_id=job.id,
                     url=result["url"],
-                    data=result["data"]
+                    data=result.get("data", {})
                 )
                 self.db.add(extracted_data)
             
+            # Update job status
             job.status = "completed"
             job.completed_at = datetime.datetime.utcnow()
             self.db.commit()
             
-            logger.info(f"Crawl job {job_id} completed successfully")
+            logger.info(f"Crawl job {job_id} completed successfully. Extracted {len(results)} records.")
             return True
             
         except Exception as e:
@@ -95,6 +114,15 @@ class CrawlService:
             
             logger.error(f"Crawl job {job_id} failed: {e}")
             return False
+    
+    async def _run_crawler(self, job: CrawlJob) -> List[Dict]:
+        """Run the crawler asynchronously"""
+        async with SimpleCrawler(
+            max_concurrent=3,  # Conservative for local development
+            delay_range=(1, 2),
+            respect_robots=True
+        ) as crawler:
+            return await crawler.crawl_urls(job.target_urls, job.extraction_rules)
     
     def get_extracted_data(self, job_id: int, user_id: int) -> List[ExtractedData]:
         job = self.get_crawl_job(job_id, user_id)
