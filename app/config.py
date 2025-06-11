@@ -1,5 +1,3 @@
-import os
-from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -11,9 +9,12 @@ class Settings(BaseSettings):
     rate_limit_requests: int
     rate_limit_window: int
     debug: bool
+    verify_ssl: bool
+    ssl_cert_path: str
     default_user_agent: str
     max_concurrent_requests: int 
     request_delay: float
+    respect_robots: bool
     environment: str
     
     class Config:

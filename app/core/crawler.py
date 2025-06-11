@@ -1,10 +1,11 @@
 import asyncio
 import aiohttp
-from bs4 import BeautifulSoup
-from typing import List, Dict, Any, Optional
+import ssl
+from typing import List, Dict, Optional
 import logging
 from fake_useragent import UserAgent
 import random
+import certifi
 from .robots_checker import RobotsChecker
 from .data_extractor import DataExtractor
 
@@ -15,19 +16,39 @@ class SimpleCrawler:
                  max_concurrent: int = 5, 
                  delay_range: tuple = (1, 2),
                  user_agent: Optional[str] = None,
-                 respect_robots: bool = True):
+                 respect_robots: bool = True,
+                 verify_ssl: bool = True):
         self.max_concurrent = max_concurrent
         self.delay_range = delay_range
         self.session = None
         self.ua = UserAgent()
         self.user_agent = user_agent or self.ua.random
         self.respect_robots = respect_robots
-        self.robots_checker = RobotsChecker(self.user_agent) if respect_robots else None
+        self.verify_ssl = verify_ssl
+        self.robots_checker = RobotsChecker(self.user_agent, verify_ssl) if respect_robots else None
         self.data_extractor = DataExtractor()
+        
+        # Create SSL context
+        if verify_ssl:
+            self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+        else:
+            self.ssl_context = False  # Disable SSL verification
         
     async def __aenter__(self):
         timeout = aiohttp.ClientTimeout(total=30)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        
+        # Create connector with SSL context
+        connector = aiohttp.TCPConnector(
+            ssl=self.ssl_context,
+            limit=100,
+            limit_per_host=30,
+            enable_cleanup_closed=True
+        )
+        
+        self.session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector
+        )
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -62,6 +83,12 @@ class SimpleCrawler:
         for result in results:
             if isinstance(result, Exception):
                 logger.error(f"Crawl task failed: {result}")
+                # Still add error result for debugging
+                valid_results.append({
+                    "url": "unknown",
+                    "error": str(result),
+                    "data": {}
+                })
             else:
                 valid_results.append(result)
         
@@ -75,17 +102,22 @@ class SimpleCrawler:
                     'User-Agent': self.user_agent,
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
+                    'Accept-Encoding': 'gzip, deflate, br',
                     'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Cache-Control': 'max-age=0'
                 }
                 
                 logger.info(f"Crawling URL: {url}")
                 
-                async with self.session.get(url, headers=headers) as response:
+                async with self.session.get(url, headers=headers, ssl=self.ssl_context) as response:
                     if response.status == 200:
                         html = await response.text()
                         result = self.data_extractor.extract_data(html, url, extraction_rules)
-                        logger.info(f"Successfully crawled: {url}")
+                        logger.info(f"Successfully crawled: {url} (Content length: {len(html)})")
                         return result
                     else:
                         error_msg = f"HTTP {response.status}"

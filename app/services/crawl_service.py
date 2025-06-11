@@ -120,7 +120,8 @@ class CrawlService:
         async with SimpleCrawler(
             max_concurrent=3,  # Conservative for local development
             delay_range=(1, 2),
-            respect_robots=True
+            respect_robots=True,
+            verify_ssl=True
         ) as crawler:
             return await crawler.crawl_urls(job.target_urls, job.extraction_rules)
     
